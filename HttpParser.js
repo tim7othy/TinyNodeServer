@@ -8,20 +8,30 @@ const ParserState = {
     BODY_CHUNKFOOTER: 7,
     BODY_SIZED: 8,
 }
+const ParserSignal = {
+    SIGNAL_NORMAL: 0,
+    SIGNAL_STOP: 1, // 停止继续解析
+}
 // 正在解析HTTP报文Header部分的状态集合
 const HeaderStateSet = new Set([ParserState.HEADER_LINE, ParserState.REQUEST_LINE, ParserState.RESPONSE_LINE])
 // 可以完成解析的状态集合
 const FinishAllowSet = new Set([ParserState.REQUEST_LINE, ParserState.RESPONSE_LINE, ParserState.BODY_RAW])
 
-class HttpParser {
-    constructor(options) {
-        this.state = options.state || ParserState.HEADER
+module.exports = class HttpParser {
+    constructor(options={}) {
+        this.type = options.type || 'request'
+        this.state = this.type === 'request' ? ParserState.REQUEST_LINE : ParserState.RESPONSE_LINE
         this.maxHeaderSize = options.maxHeaderSize || 80 * 1024
         this.headerSize = 0
         this.line = ''
         this.encoding = options.encoding || 'utf-8'
         this.info = {}
         this.callbacks = {}
+        this.signal = ParserSignal.SIGNAL_NORMAL // 
+    }
+
+    on(ev, cb) {
+        this.callbacks[ev] = cb
     }
 
     execute(chunk, start, length) {
@@ -32,12 +42,11 @@ class HttpParser {
         // 待解析片段的结尾位置
         this.end = start + typeof length === 'number' ? length : chunk.length;
         while (this.offset < end) {
-            // 根据状态获取解析函数并调用，根据解析返回的信号进行下一步操作
-            const signal = this[this.state]()
-            if (signal === 1) {
-                // 停止解析
+            if (this.signal === ParserSignal.SIGNAL_STOP) {
                 break;
             }
+            // 根据状态获取解析函数并调用，根据解析返回的信号进行下一步操作
+            this[this.state]()
         }
 
         this.chunk = null;
@@ -57,7 +66,7 @@ class HttpParser {
         for (let i = this.offset; i < this.end; i++) {
             if (this.chunk[i] === 0x0a /* \n */) {
                 // this.line 是上一次执行execute剩余没解析完的行
-                const line = this.line + chunk.toString(this.encoding, this.offset, i);
+                const line = this.line + this.chunk.toString(this.encoding, this.offset, i);
                 if (line.charAt(line.length - 1) === '\r') {
                   line = line.substr(0, line.length - 1);
                 }
