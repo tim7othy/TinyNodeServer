@@ -1,24 +1,29 @@
+const EventEmitter = require('events')
+const { Readable } = require('stream')
+
 const ParserState = {
-    REQUEST_LINE: 1,
-    RESPONSE_LINE: 2,
-    HEADER_LINE: 3,
-    BODY_RAW: 4,
-    BODY_CHUNKHEAD: 5,
-    BODY_CHUNKDATA: 6,
-    BODY_CHUNKFOOTER: 7,
-    BODY_SIZED: 8,
+    REQUEST_LINE: 'REQUEST_LINE',
+    RESPONSE_LINE: 'RESPONSE_LINE',
+    HEADER_LINE: 'HEADER_LINE',
+    BODY_RAW: 'BODY_RAW',
+    BODY_CHUNKHEAD: 'BODY_CHUNKHEAD',
+    BODY_CHUNKDATA: 'BODY_CHUNKDATA',
+    BODY_CHUNKFOOTER: 'BODY_CHUNKFOOTER',
+    BODY_SIZED: 'BODY_SIZED',
 }
 const ParserSignal = {
-    SIGNAL_NORMAL: 0,
-    SIGNAL_STOP: 1, // 停止继续解析
+    SIGNAL_NORMAL: 'SIGNAL_NORMAL',
+    SIGNAL_STOP: 'SIGNAL_STOP', // 停止继续解析
 }
 // 正在解析HTTP报文Header部分的状态集合
 const HeaderStateSet = new Set([ParserState.HEADER_LINE, ParserState.REQUEST_LINE, ParserState.RESPONSE_LINE])
 // 可以完成解析的状态集合
 const FinishAllowSet = new Set([ParserState.REQUEST_LINE, ParserState.RESPONSE_LINE, ParserState.BODY_RAW])
 
-module.exports = class HttpParser {
+module.exports = class HttpParser extends EventEmitter {
     constructor(options={}) {
+        super()
+        this.socket = options.socket
         this.type = options.type || 'request'
         this.state = this.type === 'request' ? ParserState.REQUEST_LINE : ParserState.RESPONSE_LINE
         this.maxHeaderSize = options.maxHeaderSize || 80 * 1024
@@ -30,10 +35,36 @@ module.exports = class HttpParser {
         this.signal = ParserSignal.SIGNAL_NORMAL // 
     }
 
-    on(ev, cb) {
-        this.callbacks[ev] = cb
+    parserOnHeadersComplete() {
+        const req = new Readable()
+        req.headers = this.info.headers
+        req.method = this.info.method
+        req.url = this.info.path
+        req.version = this.info.version
+        this.emit('incoming', req)
+        this.request = req
     }
 
+    parserOnBody(b, start, len) {
+        const stream = this.request;
+        // If the stream has already been removed, then drop it.
+        if (stream === null)
+            return;
+        if (len > 0) {
+            const slice = b.slice(start, start + len)
+            stream.push(slice)    
+        }
+    }
+
+    parserOnMessageComplete() {
+        const stream = this.request;
+        if (stream !== null) {
+          stream.complete = true;
+          // 结束请求流
+          stream.push(null);
+        }
+    }
+    
     execute(chunk, start, length) {
         // 当前正在解析的片段
         this.chunk = chunk;
@@ -41,7 +72,7 @@ module.exports = class HttpParser {
         this.offset = start || 0;
         // 待解析片段的结尾位置
         this.end = start + typeof length === 'number' ? length : chunk.length;
-        while (this.offset < end) {
+        while (this.offset < this.end) {
             if (this.signal === ParserSignal.SIGNAL_STOP) {
                 break;
             }
@@ -66,7 +97,7 @@ module.exports = class HttpParser {
         for (let i = this.offset; i < this.end; i++) {
             if (this.chunk[i] === 0x0a /* \n */) {
                 // this.line 是上一次执行execute剩余没解析完的行
-                const line = this.line + this.chunk.toString(this.encoding, this.offset, i);
+                let line = this.line + this.chunk.toString(this.encoding, this.offset, i);
                 if (line.charAt(line.length - 1) === '\r') {
                   line = line.substr(0, line.length - 1);
                 }
@@ -122,6 +153,9 @@ module.exports = class HttpParser {
     parseHeaderLine(line) {
         const [k, v] = this.normalizeLine(line).split(': ')
         if (k && v) {
+            if (!this.info.headers) {
+                this.info.headers = {}
+            }
             this.info.headers[k] = v
         }
     }
@@ -142,7 +176,6 @@ module.exports = class HttpParser {
                     break;
             }
         }
-        
         if (this.isChunked) {
             this.state = ParserState.BODY_CHUNKHEAD
         } else if (this.hasContentLength) {
@@ -180,6 +213,7 @@ module.exports = class HttpParser {
             this.state = ParserState.HEADER_LINE
         } else {
             // 空行，代表请求头解析完成
+            this.parserOnHeadersComplete()
             // 从请求头信息中获取下一个状态
             this.nextStateFromHeaders()
         }
@@ -203,7 +237,7 @@ module.exports = class HttpParser {
         // 可能TCP分包将HTTP中的chunk分隔开了，一次读取不了全部的chunk
         const sizeToRead = Math.min(this.end - this.offset, this.bodyByteLength);
         // 触发回调处理chunk数据
-        this.callbacks['onChunkData'](this.chunk, this.offset, sizeToRead)
+        this.parserOnBody(this.chunk, this.offset, sizeToRead)
         this.offset += sizeToRead;
         this.bodyByteLength -= sizeToRead;
         // 当前chunk体读完了，接着读取下一个
@@ -215,7 +249,7 @@ module.exports = class HttpParser {
 
     BODY_CHUNKFOOTER() {
         // 这里可能出现请求头，这里为了简便省略
-        this.callbacks['onComplete']()
+        this.parserOnMessageComplete()
         // 结束解析
         this.offset = this.end;
     }
@@ -223,21 +257,20 @@ module.exports = class HttpParser {
     BODY_SIZED() {
         const sizeToRead = Math.min(this.end - this.offset, this.bodyByteLength);
         // 触发回调处理body的一块数据
-        this.callbacks['onBodyData'](this.chunk, this.offset, sizeToRead)
-        this.offset += length;
-        this.bodyByteLength -= length;
+        this.parserOnBody(this.chunk, this.offset, sizeToRead)
+        this.offset += sizeToRead;
+        this.bodyByteLength -= sizeToRead;
         // 解析完成
         if (!this.bodyByteLength) {
-            this.callbacks['onComplete']()
+            this.parserOnMessageComplete()
             this.offset = this.end;
         }      
     }
 
     BODY_RAW() {
-        const sizeToRead = this.end - this.offset;
-        this.callbacks['onRawData'](this.chunk, this.offset, sizeToRead)
         // 直接读取完成
-        this.offset = this.end;   
+        this.offset = this.end;
+        this.parserOnMessageComplete()
     }
 }
 

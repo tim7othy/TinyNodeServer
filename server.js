@@ -1,10 +1,11 @@
-const net = require('net')
+const net = require('net');
+const EventEmitter = require('events');
 const HttpParser = require('./HttpParser')
-const TCPServer = net.createServer()
+const Response = require('./Response');
 
-const RESPONSE_TEMPLATE = `
-HTTP/1.1 200 OK\r\nServer: my-web-server\r\nContent-Length: 0\r\n\r\n
-`
+// const RESPONSE_TEMPLATE = `
+// HTTP/1.1 200 OK\r\nServer: my-web-server\r\nContent-Length: 0\r\n\r\n
+// `
 // TCPServer.addListener('connection', (socket) => {
 //     socket.once('readable', () => {
 //         let reqBuf = Buffer.from('');
@@ -42,20 +43,42 @@ HTTP/1.1 200 OK\r\nServer: my-web-server\r\nContent-Length: 0\r\n\r\n
 //     })
 // })
 
-TCPServer.addListener('connection', (socket) => {
-    const parser = new HttpParser()
-    parser.on('onHeadersComplete', (info) => {
+class HttpServer extends EventEmitter {
+    constructor(requestListener) {
+        super()
+        this.server = net.createServer();
+        if (requestListener) {
+            this.on('request', requestListener)
+        }
+        this.server.addListener('connection', this.connectionListener.bind(this))
+    }
 
-    })
-    parser.on('onBodyData', (chunk) => {
+    connectionListener(socket) {
+        const parser = new HttpParser()
+        socket.on('data', this.socketOnData.bind(this, parser))
+        parser.on('incoming', this.parserOnIncoming.bind(this, socket))
+    }
 
-    })
-    parser.on('onMessageComplete', () => {
+    socketOnData(parser, data) {
+        parser.execute(data)
+    }
 
-    })
-    socket.on('data', (chunk) => {
-        parser.execute(chunk)
-    })
-})
+    parserOnIncoming(socket, req) {
+        const res = new Response(socket, req)
+        this.emit('request', req, res)
+    }
 
-TCPServer.listen(6666, '127.0.0.1')
+    listen(port) {
+        this.server.listen(port)
+    }
+}
+
+new HttpServer((req, res) => {
+    console.log('request info: ', req.url, req.method, req.version)
+    console.log('request headers: ', req.headers)
+    req.on('data', (chunk) => {
+        console.log('body data: ', chunk.toString())
+    })
+    res.write('request received')
+    res.end()
+}).listen(6666)
