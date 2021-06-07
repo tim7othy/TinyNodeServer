@@ -1,3 +1,5 @@
+const { FormValidationError } = require('./error')
+
 module.exports = class FormMeta {
     static SchemaForm(cls) {
         const fields = {}
@@ -30,20 +32,22 @@ module.exports = class FormMeta {
                 }
             }
 
-            validate() {
+            async validate() {
                 this.errors = {} 
                 let success = true
                 for (const [key, field] of Object.entries(this._fields)) {
-                    const ok = field.validate()
-                    if (!ok) {
+                    const okRes = await field.validate()
+                    if (!okRes) {
                         this.errors[key] = field.errors
                         success = false
                     } 
-                } 
+                }
+                if (!success) {
+                    throw new FormValidationError(this.errors)
+                }
                 return success
             }
         }
-        // mixin(subCls.prototype, proto, false)
         return subCls
     }
 }
